@@ -29,4 +29,4 @@ class hparams:
             lstm_hidden_dims = 512
             lstm_num_layers = 1
 
-    files = 'path/to/files'
+    files = '../data'
