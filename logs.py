@@ -79,7 +79,7 @@ class Logger(SummaryWriter):
         for plot, series in scalars.items():
             self.add_scalars(plot, series, step)
 
-    def log_validation(self, model, step, scalars, image_data=None, embedding_data=None, losses=None):
+    def log_validation(self, model, step, scalars, image_data=None, embedding_data=None, datapoint_losses=None):
         for plot, series in scalars.items():
             self.add_scalars(plot, series, step)
 
@@ -115,15 +115,18 @@ class Logger(SummaryWriter):
                         label_img.append(color)
                         break
             label_img = torch.stack(label_img)
-            self.add_embedding(embedding, metadata=metadata, label_img=label_img)
+            self.add_embedding(embedding, metadata=metadata, label_img=label_img, global_step=step)
 
         # Log losses
-        if losses is not None:
+        if datapoint_losses is not None:
             sorted_losses = dict()
-            for key, value in sorted(losses.items(), key=lambda item: item[1], reverse=True):
+            for key, value in sorted(datapoint_losses.items(), key=lambda item: item[1], reverse=True):
                 sorted_losses[key] = value
-            df = pd.DataFrame([[k, v] for k, v in sorted_losses.items()], columns=['path', 'loss'])
-            self.add_text('ordered losses', df.to_string(header=True), global_step=step)
+            df = \
+                pd.DataFrame([[k.replace('../data', ''), v]
+                              for k, v in sorted_losses.items()][:hp.training.n_entries_in_valid_loss_report],
+                             columns=['path', 'loss'])
+            self.add_text('ordered losses', df.to_markdown(), global_step=step)
 
     def img(self, color_value, H=10, W=10):
-        return torch.tensor(color_value).unsqueeze(0).unsqueeze(2).unsqueeze(3).repeat(1, 1, H, W)
+        return torch.tensor(color_value).unsqueeze(1).unsqueeze(2).repeat(1, H, W)

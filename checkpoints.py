@@ -24,7 +24,7 @@ class EarlyStopping:
         self.best_score = best_score
         self.early_stop = False
 
-    def __call__(self, val_loss, model, optimizer, scaler, dataset, step):
+    def __call__(self, val_loss, model, optimizer, scaler, step):
 
         self.step = step
         score = -val_loss
@@ -32,13 +32,13 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = score
             save_checkpoint(self.run_dir, model, optimizer, scaler,
-                            self.best_score, self.counter, dataset, step, 'best')
+                            self.best_score, self.counter, step, 'best')
             save_checkpoint(self.run_dir, model, optimizer, scaler,
-                            self.best_score, self.counter, dataset, step, 'latest')
+                            self.best_score, self.counter, step, 'latest')
         elif score < self.best_score:
             self.counter += 1
             save_checkpoint(self.run_dir, model, optimizer, scaler,
-                            self.best_score, self.counter, dataset, step, 'latest')
+                            self.best_score, self.counter, step, 'latest')
             if self.verbose:
                 print(f'SynthStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
@@ -46,14 +46,14 @@ class EarlyStopping:
         else:
             self.best_score = score
             save_checkpoint(self.run_dir, model, optimizer, scaler,
-                            self.best_score, self.counter, dataset, step, 'best')
+                            self.best_score, self.counter, step, 'best')
             save_checkpoint(self.run_dir, model, optimizer, scaler,
-                            self.best_score, self.counter, dataset, step, 'latest')
+                            self.best_score, self.counter, step, 'latest')
             self.counter = 0
 
 
 def save_checkpoint(run_dir, model, optimizer, scaler, early_stopping_score, early_stopping_counter,
-                    dataset, step, best_or_latest, save_running=False):
+                    step, best_or_latest, save_running=False):
     assert best_or_latest in ['best', 'latest'], 'best_or_latest must be "best" or "latest".'
     pt = {
         'model_state_dict': model.state_dict(),
@@ -61,8 +61,6 @@ def save_checkpoint(run_dir, model, optimizer, scaler, early_stopping_score, ear
         'scaler': scaler.state_dict(),
         'early_stopping_score': early_stopping_score,
         'early_stopping_counter': early_stopping_counter,
-        'running_mean': dataset.running_mean,
-        'running_std': dataset.running_std,
         'step': step,
     }
     torch.save(pt, os.path.join(run_dir, f'checkpoints/{best_or_latest}_checkpoint.pt'))
@@ -77,5 +75,5 @@ def load_checkpoint(run_dir, model, optimizer, scaler, best_or_latest):
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer'])
     scaler.load_state_dict(checkpoint['scaler'])
-    return model, optimizer, scaler, checkpoint['early_stopping_score'], checkpoint['early_stopping_counter'], \
-           checkpoint['running_mean'], checkpoint['running_std'], checkpoint['step']
+    return model, optimizer, scaler, \
+           checkpoint['early_stopping_score'], checkpoint['early_stopping_counter'], checkpoint['step']

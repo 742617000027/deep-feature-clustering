@@ -9,7 +9,7 @@ from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from checkpoints import EarlyStopping, load_checkpoint, save_checkpoint
+from checkpoints import EarlyStopping, load_checkpoint
 from data import ClusterDataset, parse_data_structure
 from hparams import hparams as hp
 from logs import Logger
@@ -24,16 +24,16 @@ def inference(model, dataset):
         for _ in tqdm(range(hp.training.n_inference_examples), desc='Inference'):
             inputs, features, audio, M, file = next(iter(dataset))
 
-            inputs = inputs.to(0, non_blocking=True)
-            features = dataset.normalize(features, validation=True).to(0, non_blocking=True)
-            M = M.to(0, non_blocking=True)
+            inputs = inputs.to(0, non_blocking=True).unsqueeze(0)
+            features = dataset.normalize(features.unsqueeze(0)).to(0, non_blocking=True)
+            M = M.to(0, non_blocking=True).unsqueeze(0)
 
             with autocast():
                 y, encoding = model(inputs, features)
 
             image_data.append({
                 'original_sample': {
-                    'title': 'Original Sample',
+                    'title': file.replace('../data', ''),
                     'type': 'spectrogram',
                     'data': M.detach().cpu().numpy().astype(np.float32).squeeze()
                 },
@@ -58,7 +58,7 @@ def inference(model, dataset):
 
 
 def validation(model, criterion, loader, dataset):
-    valid_loss = 0.
+    valid_loss = []
     data = dict()
 
     model.eval()
@@ -70,23 +70,25 @@ def validation(model, criterion, loader, dataset):
                     break
 
                 inputs = inputs.to(0, non_blocking=True)
-                features = dataset.normalize(features, validation=True).to(0, non_blocking=True)
+                features = dataset.normalize(features).to(0, non_blocking=True)
                 M = M.to(0, non_blocking=True)
 
                 with autocast():
                     y, encoding = model(inputs, features)
-                    loss = criterion(y, M).item()
-                    valid_loss += loss
-                    data[file] = {
-                        'loss': loss,
-                        'encoding': encoding
+                    valid_loss.append(criterion(y, M).item())
+
+                    data[file[0]] = {
+                        'loss': valid_loss[-1],
+                        'encoding': encoding.squeeze()
                     }
 
-                pbar.set_postfix(loss=loss)
+                pbar.set_postfix(loss=valid_loss[-1])
                 pbar.update()
 
+            valid_loss = np.mean(valid_loss)
+
             embedding = torch.stack([v['encoding'] for v in data.values()]).detach().cpu().numpy().astype(np.float32)
-            return valid_loss / hp.training.n_validation_steps, \
+            return valid_loss, \
                    (embedding, list(data.keys())), \
                    {k: data[k]['loss'] for k in data}
 
@@ -105,33 +107,32 @@ def training(model, optimizer, scaler, criterion, loader, dataset, early_stoppin
             model.train()
             with autocast():
                 y, _ = model(inputs, features)
-                loss = criterion(y, M)
-                loss /= hp.training.accumulation_steps
-                scaler.scale(loss).backard()
+                loss = criterion(y, M) / hp.training.accumulation_steps
+                scaler.scale(loss).backward()
 
                 if (step + 1) % hp.training.accumulation_steps == 0:
                     scaler.step(optimizer)
                     scaler.update()
                     model.zero_grad()
 
-            pbar.set_postfix(loss=loss.item())
+            pbar.set_postfix(loss=loss.item(), patience=f'{early_stopping.counter}/{hp.training.patience}')
             pbar.update()
             step = pbar.n
 
             logger.log_training(pbar.n, {
-                'training.loss': {'loss': loss.item()}
+                'training.loss': {'loss': loss.item()},
             })
 
             if pbar.n % hp.training.validation_every_n_steps == 0:
-                valid_loss, embedding_data, losses = validation(model, criterion, loader, dataset)
+                valid_loss, embedding_data, datapoint_losses = validation(model, criterion, loader, dataset)
                 image_data = inference(model, dataset)
                 logger.log_validation(model,
                                       step=pbar.n,
                                       scalars={'validation.loss': {'loss': valid_loss}},
                                       image_data=image_data,
-                                      embedding=embedding_data,
-                                      losses=losses)
-                early_stopping(valid_loss, model, optimizer, scaler, dataset, step)
+                                      embedding_data=embedding_data,
+                                      datapoint_losses=datapoint_losses)
+                early_stopping(valid_loss, model, optimizer, scaler, step)
 
                 if early_stopping.early_stop:
                     break
@@ -147,7 +148,7 @@ if __name__ == '__main__':
     # Initialize torch modules
     model = AutoEncoder()
     model.cuda()
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(model.parameters(), lr=hp.training.learning_rate)
     scaler = torch.cuda.amp.GradScaler()
     criterion = torch.nn.MSELoss()
 
@@ -156,9 +157,6 @@ if __name__ == '__main__':
         run_dir = os.path.dirname(os.path.dirname(args.checkpoint))
         model, optimizer, scaler, early_stopping_score, early_stopping_counter, running_mean, running_std, step, = \
             load_checkpoint(run_dir, model, optimizer, scaler, 'latest')
-        dataset = \
-            ClusterDataset(files=parse_data_structure(hp.files), step=step, running_mean=running_mean,
-                           running_std=running_std)
     else:
         now = time.strftime("%Y-%m-%d__%H_%M_%S", time.localtime())
         run_dir = os.path.join('..', 'runs', now)
@@ -167,7 +165,6 @@ if __name__ == '__main__':
         early_stopping_score = None
         early_stopping_counter = 0
         step = 0
-        dataset = ClusterDataset(files=parse_data_structure(hp.files))
 
     # Initialize EarlyStopping
     early_stopping = EarlyStopping(step=step,
@@ -180,6 +177,9 @@ if __name__ == '__main__':
     logger = Logger(os.path.join(run_dir, 'logs'))
 
     # Initialize data loaders
+    dataset = ClusterDataset(files=parse_data_structure(hp.files),
+                             feature_mean=np.load('mu.npy'),
+                             feature_std=np.load('std.npy'))
     loader = DataLoader(dataset=dataset,
                         batch_size=hp.training.batch_size,
                         num_workers=hp.training.num_workers,
@@ -189,11 +189,10 @@ if __name__ == '__main__':
     cudnn.benchmark = True
 
     # Execute train loop
-    try:
-        training(model, optimizer, scaler, criterion, loader, dataset, early_stopping, logger)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        save_checkpoint(run_dir, model, optimizer, scaler,
-                        early_stopping_score, early_stopping_counter, dataset, step, 'latest')
-        print('Saved checkpoint.')
+    # try:
+    training(model, optimizer, scaler, criterion, loader, dataset, early_stopping, logger)
+    # except KeyboardInterrupt:
+    #     pass
+    # finally:
+    # save_checkpoint(run_dir, model, optimizer, scaler, early_stopping_score, early_stopping_counter, dataset, step, 'latest')
+    # print('Saved checkpoint.')

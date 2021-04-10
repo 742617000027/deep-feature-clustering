@@ -48,20 +48,23 @@ class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
         self.num_mels = hp.dsp.num_mels
-        self.lstm = nn.LSTM(input_size=hp.model.encoder.encoding_dims,
-                            hidden_size=hp.model.decoder.lstm_hidden_dims,
-                            num_layers=hp.model.decoder.lstm_num_layers,
-                            batch_first=True,
-                            bidirectional=False)
-        self.fc = nn.Linear(in_features=hp.model.decoder.lstm_hidden_dims,
-                            out_features=2 * hp.dsp.num_mels)
+        self.lstm_cell = nn.LSTMCell(input_size=hp.model.encoder.encoding_dims,
+                                     hidden_size=hp.model.encoder.encoding_dims)
+        self.fc = nn.Linear(in_features=hp.model.encoder.encoding_dims,
+                            out_features=hp.dsp.num_mels)
 
-    def forward(self, encoding):
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(encoding)
-        x = torch.sigmoid(self.fc(x))
-        x = x.view(1, self.num_mels, -1, 2)
-        return x
+    def forward(self, encoding, target_length):
+        inputs = torch.zeros_like(encoding)
+        h = encoding
+        c = torch.zeros_like(h)
+        out = []
+        while len(out) < target_length:
+            h, c = self.lstm_cell(inputs, (h, c))
+            inputs = h
+            out.append(h)
+        out = torch.stack(out, dim=1)
+        out = torch.sigmoid(self.fc(out)).transpose(1, 2)
+        return out
 
 
 class AutoEncoder(nn.Module):
@@ -72,9 +75,8 @@ class AutoEncoder(nn.Module):
 
     def forward(self, inputs, features):  # , transient_spectrum):
         encoding = self.encoder(inputs, features)  # , transient_spectrum)
-        decoder_input = encoding.unsqueeze(1).repeat(1, inputs.shape[-2], 1)
-        reconstruction = self.decoder(decoder_input)
-        return minmax_scale(reconstruction,
+        y = self.decoder(encoding, inputs.shape[-1])
+        return minmax_scale(y,
                             series_min=0.,
                             series_max=1.,
                             new_min=hp.dsp.min_vol,

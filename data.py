@@ -10,11 +10,11 @@ from hparams import hparams as hp
 
 
 class ClusterDataset(IterableDataset):
-    def __init__(self, files, step=0, running_mean=None, running_std=None):
+    def __init__(self, files, feature_mean, feature_std, step=0):
         self.files = files
         self.step = step
-        self.running_mean = running_mean
-        self.running_std = running_std
+        self.feature_mean = self.tensor(feature_mean).unsqueeze(0).unsqueeze(2)
+        self.feature_std = self.tensor(feature_std).unsqueeze(0).unsqueeze(2)
 
     def __iter__(self):
         rng = np.random.default_rng()
@@ -39,24 +39,11 @@ class ClusterDataset(IterableDataset):
             channels.append(np.stack([M_scaled, M_deltas, M_deltadeltas]))
         return np.concatenate(channels, axis=0)
 
-    def normalize(self, features, validation=False):
-        if self.running_mean is None and self.running_std is None:
-            self.step += 1
-            self.running_mean = torch.mean(features, dim=(1, 2)).requires_grad(False)
-            self.running_std = torch.zeros(10).requires_grad(False)
-            return torch.cat([features[:, :, :, 0], features[:, :, :, 1]], dim=1)
-        else:
-            if not validation:
-                self.step += 1
-                local_mean = torch.mean(features, dim=(1, 2)).requires_grad(False)
-                new_mean = self.running_mean + (local_mean - self.running_mean) / self.step
-                self.running_std = self.running_std + (local_mean - self.running_mean) * (local_mean - new_mean)
-                self.running_mean = new_mean
-            return torch.cat(
-                [(features[:, :, :, 0] - self.running_mean) / self.running_std,
-                 (features[:, :, :, 1] - self.running_mean) / self.running_std],
-                dim=1
-            )
+    def normalize(self, features):
+        return torch.cat(
+            [(features[:, :, :, 0] - self.feature_mean) / self.feature_std,
+             (features[:, :, :, 1] - self.feature_mean) / self.feature_std],
+            dim=1)
 
     def tensor(self, x):
         return torch.tensor(x.astype(np.float32))

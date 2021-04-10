@@ -1,5 +1,6 @@
 import librosa
 import numpy as np
+import pyACA
 import scipy.signal
 import soundfile as sf
 
@@ -9,7 +10,8 @@ from hparams import hparams as hp
 def load_audio(file):
     info = sf.info(file)
     audio, _ = sf.read(file, always_2d=True)
-    audio = audio.T
+    if audio.shape[1] == 1:
+        audio = np.concatenate([audio, audio], axis=1)
 
     if info.samplerate > hp.dsp.sample_rate:
         audio = librosa.core.resample(audio, info.samplerate, hp.dsp.sample_rate)
@@ -55,26 +57,25 @@ def spectrograms(audio):
 
 def amplitude_to_db(X):
     X = librosa.amplitude_to_db(X, ref=1.0, top_db=hp.dsp.max_vol - hp.dsp.min_vol)
-    X += X.max().abs() + hp.dsp.max_vol
+    X += np.abs(np.max(X)) + hp.dsp.max_vol
     return X
 
 
 def audio_features(S):
-    features = np.zeros((hp.dsp.num_audio_features, S.shape[1], 2))
-    S_pad = np.pad(S, ((0, 0), (1, 0), (0, 0)))
+    features = []
     for ch in range(2):
-        for t in range(1, S_pad.shape[1]):
-            features[0, t, ch] = spectral_flux(S_pad[:, t, ch], S_pad[:, t - 1, ch])
-            features[1, t, ch] = spectral_rolloff(S_pad[:, t, ch])
-            features[2, t, ch] = spectral_centroid(S_pad[:, t, ch])
-            features[3, t, ch] = spectral_spread(S_pad[:, t, ch], features[2, t, ch])
-            features[4, t, ch] = spectral_flatness(S_pad[:, t, ch])
-            features[5, t, ch] = spectral_crest(S_pad[:, t, ch])
-            features[6, t, ch] = spectral_kurtosis(S_pad[:, t, ch])
-            features[7, t, ch] = spectral_skewness(S_pad[:, t, ch])
-            features[8, t, ch] = spectral_slope(S_pad[:, t, ch])
-            features[9, t, ch] = tonal_power_ratio(S_pad[:, t, ch])
-    return features
+        centroid = pyACA.FeatureSpectralCentroid(S[:, :, ch], hp.dsp.sample_rate)
+        crest = pyACA.FeatureSpectralCrestFactor(S[:, :, ch], hp.dsp.sample_rate)
+        decrease = pyACA.FeatureSpectralDecrease(S[:, :, ch], hp.dsp.sample_rate)
+        flatness = pyACA.FeatureSpectralFlatness(S[:, :, ch], hp.dsp.sample_rate)
+        flux = pyACA.FeatureSpectralFlux(S[:, :, ch], hp.dsp.sample_rate)
+        kurtosis = pyACA.FeatureSpectralKurtosis(S[:, :, ch], hp.dsp.sample_rate)
+        rolloff = pyACA.FeatureSpectralRolloff(S[:, :, ch], hp.dsp.sample_rate)
+        skewness = pyACA.FeatureSpectralSkewness(S[:, :, ch], hp.dsp.sample_rate)
+        slope = pyACA.FeatureSpectralSlope(S[:, :, ch], hp.dsp.sample_rate)
+        tpr = pyACA.FeatureSpectralTonalPowerRatio(S[:, :, ch], hp.dsp.sample_rate)
+        features.append(np.stack([centroid, crest, decrease, flatness, flux, kurtosis, rolloff, skewness, slope, tpr]))
+    return np.stack(features, axis=2)
 
 
 def spectral_flux(this_frame, prev_frame):
@@ -92,27 +93,53 @@ def spectral_rolloff(frame):
 
 
 def spectral_centroid(frame):
-    return np.dot(np.arange(len(frame)), frame) / ((len(frame) - 1) * np.sum(frame))
+    if np.sum(frame) == 0:
+        return 0.5
+    return np.dot(np.arange(len(frame)), frame) / ((len(frame) - 1) * (np.sum(frame)))
 
 
 def spectral_spread(frame, centroid):
-    return np.sqrt(np.dot(np.arange(len(frame)) - centroid * len(frame) / 2, frame) / np.sum(frame))
+    norm = np.sum(frame)
+    if norm == 0:
+        norm = 1.
+    return np.sqrt(np.dot((np.arange(len(frame)) - centroid) ** 2, frame) / norm)
 
 
 def spectral_flatness(frame):
-    return np.prod(frame) ** (1 / len(frame)) / np.mean(frame)
+    gmean = np.exp(np.mean(np.log(1. + frame ** 2))) - 1.
+    amean = np.mean(frame ** 2)
+    return gmean / (amean + 1e-8)
 
 
 def spectral_crest(frame):
-    return np.max(frame) / np.mean(frame)
+    norm = np.sum(frame)
+    if norm == 0:
+        norm = 1.
+    return np.max(frame) / norm
 
 
-def spectral_kurtosis(frame):
-    return (2 * np.sum((frame - np.mean(frame)) ** 4) / (len(frame) * np.std(frame) ** 4)) - 3
+def spectral_kurtosis(frame, centroid, spread):
+    f = np.arange(0, len(frame)) / (len(frame) - 1) * hp.dsp.sample_rate / 2
+    centroid *= hp.dsp.sample_rate / 2
+    norm = np.sum(frame)
+    if norm == 0:
+        norm = 1.
+    if spread == 0:
+        spread = 1.
+    kurtosis = np.dot((f - centroid) ** 4, frame) / (spread ** 4 * norm * len(frame))
+    return kurtosis - 3
 
 
-def spectral_skewness(frame):
-    return 2 * np.sum((frame - np.mean(frame)) ** 3) / (len(frame) * np.std(frame) ** 3)
+def spectral_skewness(frame, centroid, spread):
+    f = np.arange(0, len(frame)) / (len(frame) - 1) * hp.dsp.sample_rate / 2
+    centroid *= hp.dsp.sample_rate / 2
+    norm = np.sum(frame)
+    if norm == 0:
+        norm = 1.
+    if spread == 0:
+        spread = 1.
+    skewness = np.dot((f - centroid) ** 3, frame) / (spread ** 3 * norm * len(frame))
+    return skewness
 
 
 def spectral_slope(frame):
